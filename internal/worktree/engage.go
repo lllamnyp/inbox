@@ -77,6 +77,13 @@ func Engage(prURL, repoWithOwner string, number int, headRef string, out io.Writ
 			remotes, _ := exec.Command("git", "-C", wt, "remote", "-v").CombinedOutput()
 			return "", fmt.Errorf("%s already exists but tracks a different repo:\n%s", wt, strings.TrimSpace(string(remotes)))
 		}
+		if headRef != "" {
+			if branch, linked := worktreeInfo(wt, primary); linked && !branchCompatible(branch, headRef) {
+				// Right repo, wrong branch: the number on the directory
+				// refers to something other than this PR.
+				return "", fmt.Errorf("%s is checked out on %q, not the PR's head %q — it likely holds unrelated work; refusing", wt, branch, headRef)
+			}
+		}
 		fmt.Fprintf(out, "worktree already exists: %s\n", wt)
 		return wt, nil
 	}

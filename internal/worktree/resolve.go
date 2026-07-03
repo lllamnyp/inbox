@@ -107,13 +107,14 @@ func NewScanner() *Scanner {
 	return &Scanner{byBranch: map[string]map[string]string{}}
 }
 
-// worktreeBranch returns the branch checked out at path, iff path is a
-// linked worktree of primary. Pure file reads: a linked worktree's .git is a
-// file "gitdir: <primary>/.git/worktrees/<name>", which simultaneously
-// proves repo identity — a sibling that happens to share the name prefix but
-// is its own repository (cozyportal-ui vs cozyportal) has a .git *directory*
-// and never matches.
-func worktreeBranch(path, primary string) (string, bool) {
+// worktreeInfo reports whether path is a linked worktree of primary, and if
+// so which branch it has checked out ("" for a detached HEAD). Pure file
+// reads: a linked worktree's .git is a file
+// "gitdir: <primary>/.git/worktrees/<name>", which simultaneously proves
+// repo identity — a sibling that happens to share the name prefix but is its
+// own repository (cozyportal-ui vs cozyportal) has a .git *directory* and
+// never matches.
+func worktreeInfo(path, primary string) (branch string, linked bool) {
 	b, err := os.ReadFile(filepath.Join(path, ".git"))
 	if err != nil {
 		return "", false
@@ -130,8 +131,11 @@ func worktreeBranch(path, primary string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	branch, ok := strings.CutPrefix(strings.TrimSpace(string(h)), "ref: refs/heads/")
-	return branch, ok // detached HEAD -> no branch to match
+	branch, _ = strings.CutPrefix(strings.TrimSpace(string(h)), "ref: refs/heads/")
+	if branch == strings.TrimSpace(string(h)) {
+		branch = "" // detached HEAD
+	}
+	return branch, true
 }
 
 // branchWorktrees maps checked-out branch -> path across primary's linked
@@ -152,28 +156,45 @@ func (s *Scanner) branchWorktrees(primary string) map[string]string {
 			continue
 		}
 		path := filepath.Join(filepath.Dir(primary), e.Name())
-		if branch, ok := worktreeBranch(path, primary); ok {
+		if branch, linked := worktreeInfo(path, primary); linked && branch != "" {
 			m[branch] = path
 		}
 	}
 	return m
 }
 
-// Resolve finds the worktree for a PR: the numbered convention
-// (<repo>-<num>) first, then any sibling worktree whose checked-out branch
-// is the PR's head branch — which is how feature worktrees named before the
-// PR existed (repo-freedompay, not repo-867) get picked up.
+// Resolve finds the worktree for a PR. Branch equality is the strongest
+// evidence and covers numbered and feature-named worktrees alike — it's how
+// worktrees named before the PR existed (repo-freedompay, not repo-867) get
+// picked up. The numbered path (<repo>-<num>) alone is weak evidence: the
+// number might refer to something other than this PR (an external ticket —
+// same-repo issue numbers can't collide, issues and PRs share a sequence),
+// so it only wins when its git state can't contradict the PR: a linked
+// worktree parked on a detached HEAD (mid-engage), or on the PR's head
+// branch modulo a fork-collision prefix (gh pr checkout may create
+// owner/branch). A numbered worktree on an unrelated branch is not this
+// PR's worktree.
 func (s *Scanner) Resolve(prURL, repoWithOwner string, number int, headRef string) (path string, exists bool) {
 	primary, wt := Paths(prURL, repoWithOwner, number)
-	if Exists(wt) {
-		return wt, true
-	}
 	if headRef != "" {
 		if p, ok := s.branchWorktrees(primary)[headRef]; ok {
 			return p, true
 		}
 	}
+	if Exists(wt) {
+		if branch, linked := worktreeInfo(wt, primary); linked && branchCompatible(branch, headRef) {
+			return wt, true
+		}
+	}
 	return wt, false
+}
+
+// branchCompatible reports whether a numbered worktree's checked-out branch
+// is consistent with the PR's head ref: detached, exact match, or a
+// fork-collision-prefixed variant.
+func branchCompatible(branch, headRef string) bool {
+	return branch == "" || branch == headRef ||
+		(headRef != "" && strings.HasSuffix(branch, "/"+headRef))
 }
 
 // Annotate fills the worktree/session fields of a derived PR row.

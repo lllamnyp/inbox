@@ -288,19 +288,25 @@ Every worked-on PR conventionally lives in a worktree at
 feature name instead (`cozyportal-freedompay`, not `cozyportal-867`), so
 resolution runs in two steps:
 
-1. Probe `<repo>-<num>` — the numbered convention wins when present.
-2. Otherwise scan the `<repo>-*` siblings and match each worktree's
-   checked-out branch against the PR's `headRefName`. No stored mapping
-   needed: git already records both halves. The scan is pure file reads — a
-   linked worktree's `.git` is a *file* containing
+1. Scan the `<repo>-*` siblings and match each worktree's checked-out branch
+   against the PR's `headRefName` — branch equality is the strongest
+   evidence and covers numbered and feature-named worktrees alike. No stored
+   mapping needed: git already records both halves. The scan is pure file
+   reads — a linked worktree's `.git` is a *file* containing
    `gitdir: <primary>/.git/worktrees/<name>`, which yields the checked-out
    branch (that gitdir's `HEAD`) and proves repo identity in the same step:
    a same-prefix sibling that is its own repository (`cozyportal-ui` next to
    `cozyportal`) has a `.git` directory and can never match. One scan per
    repository per poll, memoized.
-
-A worktree on a detached HEAD has no branch to match and is only found via
-the numbered convention.
+2. Fall back to `<repo>-<num>` — but the directory name alone is weak
+   evidence (the identifier might be an external ticket number, or an issue
+   number in another repo; *same-repo* issue numbers can't collide since
+   issues and PRs share one number sequence). The numbered path attaches
+   only when its git state doesn't contradict the PR: detached HEAD
+   (mid-`engage`), the PR's head branch, or `gh pr checkout`'s
+   fork-collision-prefixed `owner/branch` variant. A numbered worktree
+   sitting on an unrelated branch is treated as not this PR's worktree, and
+   `engage` refuses it rather than reusing or overwriting it.
 
 Claude Code stores per-project sessions under
 `~/.claude/projects/<encoded-cwd>/`. The encoding replaces every character

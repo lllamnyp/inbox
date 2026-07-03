@@ -6,16 +6,20 @@ import (
 	"testing"
 )
 
-// fabricate a primary clone with one linked worktree checked out on branch,
-// plus the on-disk shape git actually writes: the worktree's .git is a file
-// pointing into <primary>/.git/worktrees/<name>.
+// fabricate a primary clone with one linked worktree checked out on branch
+// ("" = detached), plus the on-disk shape git actually writes: the
+// worktree's .git is a file pointing into <primary>/.git/worktrees/<name>.
 func fakeWorktree(t *testing.T, primary, name, branch string) string {
 	t.Helper()
 	gitdir := filepath.Join(primary, ".git", "worktrees", name)
 	if err := os.MkdirAll(gitdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(gitdir, "HEAD"), []byte("ref: refs/heads/"+branch+"\n"), 0o644); err != nil {
+	head := "ref: refs/heads/" + branch + "\n"
+	if branch == "" {
+		head = "e83c5163316f89bfbde7d9ab23ca2e25604af290\n"
+	}
+	if err := os.WriteFile(filepath.Join(gitdir, "HEAD"), []byte(head), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	wt := filepath.Join(filepath.Dir(primary), name)
@@ -56,12 +60,38 @@ func TestResolveNamedWorktreeByBranch(t *testing.T) {
 	if exists || path != primary+"-42" {
 		t.Errorf("Resolve = %q, %v; want %q, false", path, exists, primary+"-42")
 	}
+}
 
-	// The numbered convention wins when it exists.
-	numbered := fakeWorktree(t, primary, "repo-42", "feat/freedompay")
-	path, exists = NewScanner().Resolve(prURL, "org/repo", 42, "feat/freedompay")
-	if !exists || path != numbered {
-		t.Errorf("Resolve = %q, %v; want %q, true", path, exists, numbered)
+func TestNumberedWorktreeMustNotContradictThePR(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("INBOX_DEV_ROOT", root)
+	primary := filepath.Join(root, "github.com", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(primary, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/org/repo/pull/42"
+
+	// repo-42 exists but holds unrelated work (numbered after an external
+	// ticket, not this PR): the name alone must not attach it.
+	fakeWorktree(t, primary, "repo-42", "fix/some-issue-work")
+	path, exists := NewScanner().Resolve(prURL, "org/repo", 42, "feat/pr-branch")
+	if exists {
+		t.Errorf("numbered worktree on an unrelated branch attached: %q", path)
+	}
+
+	// A detached numbered worktree (mid-engage) is compatible.
+	fakeWorktree(t, primary, "repo-43", "")
+	path, exists = NewScanner().Resolve("https://github.com/org/repo/pull/43", "org/repo", 43, "feat/pr-branch")
+	if !exists || path != filepath.Join(root, "github.com", "org", "repo-43") {
+		t.Errorf("detached numbered worktree not attached: %q, %v", path, exists)
+	}
+
+	// A fork-collision-prefixed branch (gh pr checkout's owner/branch form)
+	// is compatible on the numbered path.
+	fakeWorktree(t, primary, "repo-44", "alice/feat/pr-branch")
+	path, exists = NewScanner().Resolve("https://github.com/org/repo/pull/44", "org/repo", 44, "feat/pr-branch")
+	if !exists || path != filepath.Join(root, "github.com", "org", "repo-44") {
+		t.Errorf("prefixed-branch numbered worktree not attached: %q, %v", path, exists)
 	}
 }
 
@@ -74,10 +104,10 @@ func TestWorktreeBranchRejectsForeignRepos(t *testing.T) {
 	}
 	// a worktree linked to a *different* primary
 	wt := fakeWorktree(t, other, "repo-x", "main")
-	if _, ok := worktreeBranch(wt, primary); ok {
+	if _, linked := worktreeInfo(wt, primary); linked {
 		t.Error("worktree of a different primary matched")
 	}
-	if _, ok := worktreeBranch(wt, other); !ok {
-		t.Error("worktree of its own primary did not match")
+	if branch, linked := worktreeInfo(wt, other); !linked || branch != "main" {
+		t.Errorf("worktree of its own primary: branch=%q linked=%v, want main/true", branch, linked)
 	}
 }
