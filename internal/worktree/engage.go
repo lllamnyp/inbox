@@ -48,13 +48,22 @@ func run(out io.Writer, dir string, env []string, name string, args ...string) e
 // Engage sets up the per-PR worktree: clone the primary if missing, fetch,
 // add a detached worktree, check out the PR head. It prints the worktree
 // path and deliberately does NOT launch claude — fresh session vs resume is
-// the user's call.
-func Engage(prURL, repoWithOwner string, number int, out io.Writer) (string, error) {
+// the user's call. headRef (the PR's head branch, may be empty) lets a
+// feature worktree named before the PR existed win over creating a numbered
+// twin.
+func Engage(prURL, repoWithOwner string, number int, headRef string, out io.Writer) (string, error) {
 	primary, wt := Paths(prURL, repoWithOwner, number)
 	host := hostOf(prURL)
 	var env []string
 	if host != "github.com" {
 		env = []string{"GH_HOST=" + host}
+	}
+
+	if headRef != "" && !Exists(wt) {
+		if path, ok := NewScanner().branchWorktrees(primary)[headRef]; ok {
+			fmt.Fprintf(out, "worktree already exists (branch %s): %s\n", headRef, path)
+			return path, nil
+		}
 	}
 
 	if _, err := os.Stat(wt); err == nil {

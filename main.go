@@ -35,7 +35,9 @@ func main() {
 	if *engageRef != "" {
 		prURL, repo, num, err := parsePRRef(*engageRef)
 		die(err)
-		wt, err := worktree.Engage(prURL, repo, num, os.Stdout)
+		// No PR payload here, so no head branch to match named worktrees by;
+		// the numbered convention still applies.
+		wt, err := worktree.Engage(prURL, repo, num, "", os.Stdout)
 		die(err)
 		fmt.Println(wt)
 		return
@@ -61,8 +63,9 @@ func main() {
 		st.MyLogin = login
 		st.LastPollAt = time.Now()
 		st.PRs = derive.ApplyAll(st.PRs, login, prs, isBot, time.Now())
+		sc := worktree.NewScanner()
 		for _, p := range st.PRs {
-			worktree.Annotate(p)
+			sc.Annotate(p)
 		}
 		if err := st.Save(path); err != nil {
 			fmt.Fprintln(os.Stderr, "inbox: warning: state not saved:", err)

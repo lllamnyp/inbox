@@ -44,6 +44,7 @@ type PullRequest struct {
 	State          string
 	ReviewDecision string
 	HeadRefOid     string `graphql:"headRefOid"`
+	HeadRefName    string `graphql:"headRefName"`
 	UpdatedAt      time.Time
 	Repository     struct {
 		NameWithOwner string

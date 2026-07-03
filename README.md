@@ -283,10 +283,24 @@ Rough sketch:
 ## Claude Code integration
 
 Every worked-on PR conventionally lives in a worktree at
-`~/Cloud/dev/<git-server>/<org>/<repo>-<num>`. Compute the expected path from
-`(owner, repo, number)` and probe it — if `git -C <path> rev-parse` succeeds
-and its `HEAD` is not the same as the primary worktree's, the worktree
-exists and holds a distinct branch.
+`~/Cloud/dev/<git-server>/<org>/<repo>-<identifier>`. The identifier is
+*usually* the PR number — but worktrees started before the PR existed carry a
+feature name instead (`cozyportal-freedompay`, not `cozyportal-867`), so
+resolution runs in two steps:
+
+1. Probe `<repo>-<num>` — the numbered convention wins when present.
+2. Otherwise scan the `<repo>-*` siblings and match each worktree's
+   checked-out branch against the PR's `headRefName`. No stored mapping
+   needed: git already records both halves. The scan is pure file reads — a
+   linked worktree's `.git` is a *file* containing
+   `gitdir: <primary>/.git/worktrees/<name>`, which yields the checked-out
+   branch (that gitdir's `HEAD`) and proves repo identity in the same step:
+   a same-prefix sibling that is its own repository (`cozyportal-ui` next to
+   `cozyportal`) has a `.git` directory and can never match. One scan per
+   repository per poll, memoized.
+
+A worktree on a detached HEAD has no branch to match and is only found via
+the numbered convention.
 
 Claude Code stores per-project sessions under
 `~/.claude/projects/<encoded-cwd>/`. The encoding replaces every character
@@ -330,7 +344,9 @@ pane with the full strings.
 7. On the next poll, the row now shows the ⎇ marker and any existing session.
 ```
 
-Collision handling: if `<WORKTREE>` already exists, skip step 4 and just
+Collision handling: if a sibling worktree already holds the PR's head branch
+(a feature-named worktree from before the PR existed), report that path and
+create nothing. If `<WORKTREE>` already exists, skip step 4 and just
 report the path — the user probably already has a session there. If a
 different repo already occupies the sibling-named path (see the CLAUDE.md note
 about `cozyportal-ui`), refuse and print the actual `git remote -v`.

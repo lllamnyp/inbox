@@ -97,12 +97,89 @@ func ClaudeSession(worktreePath string) (id string, fresh bool, ok bool) {
 	return id, time.Since(newest) <= time.Hour, true
 }
 
+// Scanner resolves PRs to worktrees, memoizing the sibling-directory scan so
+// one poll pays the filesystem walk once per repository, not once per PR.
+type Scanner struct {
+	byBranch map[string]map[string]string // primary -> checked-out branch -> worktree path
+}
+
+func NewScanner() *Scanner {
+	return &Scanner{byBranch: map[string]map[string]string{}}
+}
+
+// worktreeBranch returns the branch checked out at path, iff path is a
+// linked worktree of primary. Pure file reads: a linked worktree's .git is a
+// file "gitdir: <primary>/.git/worktrees/<name>", which simultaneously
+// proves repo identity — a sibling that happens to share the name prefix but
+// is its own repository (cozyportal-ui vs cozyportal) has a .git *directory*
+// and never matches.
+func worktreeBranch(path, primary string) (string, bool) {
+	b, err := os.ReadFile(filepath.Join(path, ".git"))
+	if err != nil {
+		return "", false
+	}
+	gitdir, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir: ")
+	if !ok {
+		return "", false
+	}
+	gitdir = filepath.Clean(gitdir)
+	if !strings.HasPrefix(gitdir, filepath.Join(primary, ".git", "worktrees")+string(os.PathSeparator)) {
+		return "", false
+	}
+	h, err := os.ReadFile(filepath.Join(gitdir, "HEAD"))
+	if err != nil {
+		return "", false
+	}
+	branch, ok := strings.CutPrefix(strings.TrimSpace(string(h)), "ref: refs/heads/")
+	return branch, ok // detached HEAD -> no branch to match
+}
+
+// branchWorktrees maps checked-out branch -> path across primary's linked
+// worktrees following the sibling naming convention (<repo>-<anything>).
+func (s *Scanner) branchWorktrees(primary string) map[string]string {
+	if m, ok := s.byBranch[primary]; ok {
+		return m
+	}
+	m := map[string]string{}
+	s.byBranch[primary] = m
+	entries, err := os.ReadDir(filepath.Dir(primary))
+	if err != nil {
+		return m
+	}
+	prefix := filepath.Base(primary) + "-"
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		path := filepath.Join(filepath.Dir(primary), e.Name())
+		if branch, ok := worktreeBranch(path, primary); ok {
+			m[branch] = path
+		}
+	}
+	return m
+}
+
+// Resolve finds the worktree for a PR: the numbered convention
+// (<repo>-<num>) first, then any sibling worktree whose checked-out branch
+// is the PR's head branch — which is how feature worktrees named before the
+// PR existed (repo-freedompay, not repo-867) get picked up.
+func (s *Scanner) Resolve(prURL, repoWithOwner string, number int, headRef string) (path string, exists bool) {
+	primary, wt := Paths(prURL, repoWithOwner, number)
+	if Exists(wt) {
+		return wt, true
+	}
+	if headRef != "" {
+		if p, ok := s.branchWorktrees(primary)[headRef]; ok {
+			return p, true
+		}
+	}
+	return wt, false
+}
+
 // Annotate fills the worktree/session fields of a derived PR row.
-func Annotate(p *derive.PR) {
-	_, wt := Paths(p.URL, p.Repo, p.Number)
-	p.WorktreePath = wt
-	p.WorktreeExists = Exists(wt)
-	if id, fresh, ok := ClaudeSession(wt); ok {
+func (s *Scanner) Annotate(p *derive.PR) {
+	p.WorktreePath, p.WorktreeExists = s.Resolve(p.URL, p.Repo, p.Number, p.HeadRefName)
+	if id, fresh, ok := ClaudeSession(p.WorktreePath); ok {
 		p.ClaudeSessionID = id
 		p.SessionFresh = fresh
 	} else {

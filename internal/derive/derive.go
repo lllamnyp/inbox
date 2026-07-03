@@ -69,6 +69,7 @@ type PR struct {
 	IsDraft         bool      `json:"is_draft"`
 	Role            string    `json:"role"` // "author" | "reviewer"
 	HeadSHA         string    `json:"head_sha"`
+	HeadRefName     string    `json:"head_ref_name"`
 	HeadCommittedAt time.Time `json:"head_committed_at"`
 	ReviewDecision  string    `json:"review_decision"`
 	UpdatedAt       time.Time `json:"updated_at"`
@@ -159,6 +160,7 @@ func Derive(pr ghclient.PullRequest, prev *PR, me string, isBot func(string) boo
 		IsDraft:        pr.IsDraft,
 		ReviewDecision: pr.ReviewDecision,
 		HeadSHA:        pr.HeadRefOid,
+		HeadRefName:    pr.HeadRefName,
 		UpdatedAt:      pr.UpdatedAt,
 	}
 	if strings.EqualFold(p.Author, me) {
