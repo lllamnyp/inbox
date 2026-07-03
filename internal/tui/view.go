@@ -1,0 +1,307 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/lllamnyp/inbox/internal/derive"
+)
+
+const helpText = "↑↓ nav · enter web · o gh · e engage · a ack · s snooze · i info · r poll · / search · 1-7 filter · q quit"
+
+type cols struct {
+	repo, title, role, since, new, flags int
+}
+
+func (m Model) View() string {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	now := m.now
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	var lines []string
+
+	// Header: inbox — 27 open · 8 waiting on you · last poll 42s ago
+	waiting, muted := 0, 0
+	for _, p := range m.st.PRs {
+		switch p.Status(now) {
+		case derive.StatusWaitingOnYou:
+			waiting++
+		case derive.StatusMuted:
+			muted++
+		}
+	}
+	pollStr := "last poll never"
+	if m.polling {
+		pollStr = "polling…"
+	} else if !m.lastPollDone.IsZero() {
+		pollStr = "last poll " + humanSince(now.Sub(m.lastPollDone)) + " ago"
+	} else if !m.st.LastPollAt.IsZero() {
+		pollStr = "last poll " + humanSince(now.Sub(m.st.LastPollAt)) + " ago"
+	}
+	head := fmt.Sprintf(" inbox — %d open · %d waiting on you", len(m.st.PRs), waiting)
+	if muted > 0 {
+		head += fmt.Sprintf(" · %d muted", muted)
+	}
+	head += " · " + pollStr
+	lines = append(lines, styHeader.Render(ansi.Truncate(head, width, "…")))
+
+	lines = append(lines, m.filterLine(width))
+
+	c := m.columns(width)
+	hdr := " " + pad("", 1) + " " + pad("repo#pr", c.repo) + " " + pad("title", c.title) + " " +
+		pad("role", c.role) + " " + pad("since", c.since) + " " + pad("new", c.new) + " " + pad("⌘", c.flags)
+	lines = append(lines, styColHead.Render(hdr))
+
+	vh := m.viewportHeight()
+	if len(m.rows) == 0 {
+		lines = append(lines, styDim.Render("  nothing to show — r to poll · 1 to reset the filter"))
+	} else {
+		end := min(m.offset+vh, len(m.rows))
+		for i := m.offset; i < end; i++ {
+			lines = append(lines, m.renderRow(m.rows[i], i == m.cursor, c, now))
+		}
+	}
+	for len(lines) < 3+vh {
+		lines = append(lines, "")
+	}
+
+	if m.showDetail {
+		lines = append(lines, m.detailLines(width, now)...)
+	}
+
+	switch {
+	case m.pollErr != "":
+		lines = append(lines, styErr.Render(ansi.Truncate(" poll error: "+m.pollErr, width, "…")))
+	case m.status != "":
+		lines = append(lines, styOK.Render(ansi.Truncate(" "+m.status, width, "…")))
+	default:
+		lines = append(lines, "")
+	}
+	lines = append(lines, styDim.Render(ansi.Truncate(" "+helpText, width, "…")))
+
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) filterLine(width int) string {
+	var b strings.Builder
+	b.WriteString(styDim.Render(" Filter:"))
+	for i, name := range filterNames {
+		label := fmt.Sprintf("%d:%s", i+1, name)
+		if Filter(i) == m.filter {
+			b.WriteString(" " + styFilterOn.Render("["+label+"]"))
+		} else {
+			b.WriteString(" " + styDim.Render(label))
+		}
+	}
+	if m.searching || m.search.Value() != "" {
+		b.WriteString("  " + m.search.View())
+	}
+	return ansi.Truncate(b.String(), width, "…")
+}
+
+func (m Model) columns(width int) cols {
+	repo := 10
+	for _, p := range m.rows {
+		if w := lipgloss.Width(shortKey(p)); w > repo {
+			repo = w
+		}
+	}
+	repo = min(repo, 26)
+	c := cols{repo: repo, role: 4, since: 5, new: 10, flags: 3}
+	// margins + separators eat 9 columns
+	c.title = max(width-c.repo-c.role-c.since-c.new-c.flags-9, 8)
+	return c
+}
+
+// shortKey renders "cozyportal#867" — repo name without the owner.
+func shortKey(p *derive.PR) string {
+	name := p.Repo
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	return fmt.Sprintf("%s#%d", name, p.Number)
+}
+
+func (m Model) renderRow(p *derive.PR, selected bool, c cols, now time.Time) string {
+	st := p.Status(now)
+
+	dot := "●"
+	switch st {
+	case derive.StatusWaitingOnThem:
+		dot = "○"
+	case derive.StatusSnoozed:
+		dot = "⋯"
+	case derive.StatusMuted:
+		dot = "·"
+	}
+
+	title := p.Title
+	if p.IsDraft {
+		title = "[draft] " + title
+	}
+
+	role := "rev"
+	if p.Role == "author" {
+		role = "auth"
+	}
+
+	sinceAt := p.UpdatedAt
+	if p.TheirLastActionAt != nil {
+		sinceAt = *p.TheirLastActionAt
+	}
+	sinceD := now.Sub(sinceAt)
+	if sinceD < 0 {
+		sinceD = 0
+	}
+
+	newStr := p.NewSinceMe.String()
+	if p.ForcePushed {
+		newStr += " !"
+	}
+	if st == derive.StatusSnoozed {
+		newStr = "(snoozed)"
+	}
+	if st == derive.StatusMuted {
+		newStr = "(muted)"
+	}
+
+	flags := " "
+	if p.WorktreeExists {
+		flags = "⎇"
+	}
+	flags += " "
+	if p.SessionFresh {
+		flags += "⌗"
+	} else {
+		flags += " "
+	}
+
+	repoC := pad(shortKey(p), c.repo)
+	titleC := pad(title, c.title)
+	roleC := pad(role, c.role)
+	sinceC := pad(humanSince(sinceD), c.since)
+	newC := pad(newStr, c.new)
+	flagsC := pad(flags, c.flags)
+
+	if selected {
+		return stySelected.Render(" " + dot + " " + repoC + " " + titleC + " " + roleC + " " + sinceC + " " + newC + " " + flagsC)
+	}
+	if st == derive.StatusSnoozed || st == derive.StatusMuted {
+		return styDim.Render(" " + dot + " " + repoC + " " + titleC + " " + roleC + " " + sinceC + " " + newC + " " + flagsC)
+	}
+
+	dotS := styDotThem.Render(dot)
+	if st == derive.StatusWaitingOnYou {
+		dotS = styDotYou.Render(dot)
+	}
+	roleS := styRoleRev.Render(roleC)
+	if p.Role == "author" {
+		roleS = styRoleAuth.Render(roleC)
+	}
+	var sinceS string
+	switch {
+	case sinceD < 24*time.Hour:
+		sinceS = stySinceNew.Render(sinceC)
+	case sinceD < 72*time.Hour:
+		sinceS = stySinceMid.Render(sinceC)
+	default:
+		sinceS = stySinceOld.Render(sinceC)
+	}
+	newS := newC
+	if p.ForcePushed {
+		newS = styForce.Render(newC)
+	} else if p.NewSinceMe.Total() == 0 {
+		newS = styDim.Render(newC)
+	}
+	return " " + dotS + " " + repoC + " " + titleC + " " + roleS + " " + sinceS + " " + newS + " " + styMark.Render(flagsC)
+}
+
+func (m Model) detailLines(width int, now time.Time) []string {
+	lines := []string{styDim.Render(strings.Repeat("─", max(width, 1)))}
+	p := m.selected()
+	if p == nil {
+		lines = append(lines, styDim.Render(" no selection"), "", "", "", "")
+		return lines
+	}
+
+	wtNote := "missing — press e to engage"
+	if p.WorktreeExists {
+		wtNote = "exists"
+	}
+	session := "—"
+	if p.ClaudeSessionID != "" {
+		if p.SessionFresh {
+			session = p.ClaudeSessionID + " (fresh)"
+		} else {
+			session = p.ClaudeSessionID + " (idle)"
+		}
+	}
+	involve := ""
+	switch {
+	case p.DirectReviewRequest:
+		involve = " · review requested directly"
+	case p.CodeOwnerReviewRequest:
+		involve = " · review requested via CODEOWNERS"
+	}
+	if p.Assigned {
+		involve += " · assigned"
+	}
+	mine := "—"
+	if p.MyLastActionAt != nil {
+		mine = fmt.Sprintf("%s @ %s (%s ago)", p.MyLastActionKind, p.MyLastActionAt.Local().Format("Jan 2 15:04"), humanSince(now.Sub(*p.MyLastActionAt)))
+	}
+	theirs := "—"
+	if p.TheirLastActionAt != nil {
+		theirs = fmt.Sprintf("%s @ %s (%s ago)", p.TheirLastActionKind, p.TheirLastActionAt.Local().Format("Jan 2 15:04"), humanSince(now.Sub(*p.TheirLastActionAt)))
+	}
+	sha := p.HeadSHA
+	if len(sha) > 12 {
+		sha = sha[:12]
+	}
+
+	kv := func(k, v string) string {
+		return ansi.Truncate(" "+styDetailKey.Render(pad(k, 9))+" "+v, width, "…")
+	}
+	lines = append(lines,
+		ansi.Truncate(" "+styHeader.Render(p.Key())+" · "+p.Title, width, "…"),
+		kv("url", p.URL),
+		kv("worktree", p.WorktreePath+" ("+wtNote+")"),
+		kv("session", session),
+		kv("actions", "mine: "+mine+" · theirs: "+theirs+" · "+p.ReviewDecision+" · head "+sha+involve),
+	)
+	return lines
+}
+
+// pad truncates (ansi-aware, with ellipsis) then right-pads to width w.
+func pad(s string, w int) string {
+	s = ansi.Truncate(s, w, "…")
+	if gap := w - lipgloss.Width(s); gap > 0 {
+		s += strings.Repeat(" ", gap)
+	}
+	return s
+}
+
+func humanSince(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}

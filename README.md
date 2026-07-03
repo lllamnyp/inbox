@@ -6,9 +6,31 @@ when the last activity on it is by someone other than you.
 
 ## Status
 
-Pre-MVP. This README is the design document. There is no code yet — the layout
-below is where it's headed, not where it is. See "MVP milestones" at the
-bottom.
+MVP implemented — all six milestones below are done: fetcher + derivation,
+interactive TUI, worktree/session detection, `engage`, force-push detection,
+adaptive polling. This README remains the design document; deviations
+discovered during implementation are folded into the relevant sections.
+
+## Install & run
+
+```
+go install github.com/lllamnyp/inbox@latest
+```
+
+Auth comes from `$GITHUB_TOKEN` / `$GH_TOKEN`, falling back to
+`gh auth token`. The `engage` feature shells out to `git` and `gh`.
+
+```
+inbox                          # the TUI
+inbox --json                   # one-shot poll, derived state to stdout
+inbox --engage owner/repo#123  # set up the worktree for a PR, no TUI
+inbox --interval 30s           # foreground poll cadence (default 60s)
+inbox --state /tmp/alt.json    # alternate state file (default ~/.local/share/inbox/state.json)
+```
+
+Environment: `INBOX_BOTS` extends the bot-login pattern (additive regex);
+`INBOX_DEV_ROOT` moves the clone/worktree root (default `~/Cloud/dev` — see
+"Why this exists" for the expected layout).
 
 ## Why this exists
 
@@ -68,6 +90,21 @@ That single boolean drives everything else — filters, sort, colors.
 Explicit `ack` marks a PR "read" without changing GitHub state; new activity
 re-arms it.
 
+**Muting CODEOWNERS-only review requests.** In repos with a broad CODEOWNERS
+file, *every* PR review-requests everyone whose paths it touches — and
+`involves:@me` dutifully returns them all, as noise. GraphQL exposes the
+distinction: `ReviewRequest.asCodeOwner` says whether the request came from
+CODEOWNERS matching or from a human picking you. Rule: a PR is **muted**
+while your *only* involvement is a code-owner review request — no direct
+request, no assignment, no action of yours. Muted rows appear only under the
+`7:muted` filter tab and never count as waiting-on-you. Your first real
+action on one (comment, review, commit) un-mutes it permanently — being
+matched by CODEOWNERS is not engagement, acting is. Involvement the query
+can't see (an @-mention, say) leaves the PR visible: mute only on positive
+evidence. An earlier iteration muted on *bot-authored* instead; that was the
+wrong axis — the release bot's PRs are noisy for the same reason every other
+PR is (blanket code-owner requests), and human PRs are just as noisy.
+
 ## Scope: what to track
 
 GitHub search: `involves:@me is:pr is:open archived:false` — returns exactly the
@@ -77,7 +114,11 @@ No manual list, no per-repo config.
 ## Stack
 
 - **TUI**: [`charmbracelet/bubbletea`][bt] (Elm-style) + [`lipgloss`][lg]
-  (styles/colors) + [`bubbles/table`][bb] (data-table widget with keyboard nav).
+  (styles/colors). Table rows are rendered by hand rather than through
+  [`bubbles/table`][bb] — the design needs per-cell conditional colors (dot,
+  since-age, role) *and* a selected-row highlight, and embedded ANSI inside
+  table cells breaks the widget's row-highlight styling. `bubbles` is still
+  used for the `/` search textinput.
 - **GitHub**: [`shurcooL/githubv4`][ghv4] typed GraphQL client. One query per
   poll fetches the whole set. Auth via `$GITHUB_TOKEN` or shelling out to
   `gh auth token`.
@@ -165,9 +206,13 @@ query {
 }
 ```
 
-One call, ~5 rate-limit points, ≪ 5000/hr GraphQL budget. Bots filtered in
-code — reuse the pattern from `vibe-project-management`'s scrape:
-`gemini|coderabbit|netlify|[bot]|dependabot|renovate`.
+One search per poll, but paginated at 25 nodes per page: with the nested
+commit/review/comment lists, pages of 100 make GitHub's GraphQL gateway time
+out with 502s (found empirically at a 155-PR watch set — ~7 pages, ~26s).
+Still a handful of rate-limit points per poll, ≪ 5000/hr GraphQL budget.
+Bots filtered in code — reuse the pattern from `vibe-project-management`'s
+scrape: `gemini|coderabbit|netlify|[bot]|dependabot|renovate`. Override with
+`$INBOX_BOTS`.
 
 ## Derivation
 
@@ -231,7 +276,8 @@ Rough sketch:
 
 - `⎇` = worktree exists; `⌗` = live Claude Code session detected.
 - Default sort: waiting-on-you first, then `their_last_action_at` desc.
-- Filters as keybinds `1`..`5` (all / mine / reviewing / waiting-you / snoozed).
+- Filters as keybinds `1`..`7` (all / mine / reviewing / waiting-you /
+  waiting-them / snoozed / muted). Muted rows show only under `7`.
 - `/` toggles a substring filter over `repo#pr` + `title`.
 
 ## Claude Code integration
@@ -243,17 +289,14 @@ and its `HEAD` is not the same as the primary worktree's, the worktree
 exists and holds a distinct branch.
 
 Claude Code stores per-project sessions under
-`~/.claude/projects/<encoded-cwd>/`. The encoding replaces every `/` with `-`
-so an absolute path like `/home/lllamnyp/Cloud/dev/github.com/foo/bar-42`
-becomes `-home-lllamnyp-Cloud-dev-github-com-foo-bar-42`. Each session is a
-`<uuid>.jsonl` file whose first line is a metadata record and whose subsequent
-lines are the individual turns. Resolution:
-
-```go
-enc := strings.ReplaceAll(worktreePath, "/", "-") // absolute path, leading "-" from the "/" prefix
-dir := filepath.Join(homeDir, ".claude/projects", enc)
-// then pick the .jsonl in `dir` with the newest mtime
-```
+`~/.claude/projects/<encoded-cwd>/`. The encoding replaces every character
+outside `[a-zA-Z0-9]` with `-` (not just `/` — dots too), so an absolute path
+like `/home/lllamnyp/Cloud/dev/github.com/foo/bar-42` becomes
+`-home-lllamnyp-Cloud-dev-github-com-foo-bar-42` (note `github-com`). Each
+session is a `<uuid>.jsonl` file whose first line is a metadata record and
+whose subsequent lines are the individual turns. Resolution: encode the
+worktree path, then pick the `.jsonl` in the resulting directory with the
+newest mtime.
 
 Freshness heuristic: treat a session as "live-looking" if its `mtime` is
 within the last hour; otherwise treat it as "resumable but idle". No attempt
