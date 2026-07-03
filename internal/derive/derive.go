@@ -78,10 +78,15 @@ type PR struct {
 	MyLastActionKind    string     `json:"my_last_action_kind"`
 	TheirLastActionAt   *time.Time `json:"their_last_action_at"`
 	TheirLastActionKind string     `json:"their_last_action_kind"`
-	NewSinceMe          Counts     `json:"new_since_me"`
-	ForcePushed         bool       `json:"force_pushed"`
-	WaitingOnMe         bool       `json:"waiting_on_me"`
-	Muted               bool       `json:"muted"`
+	TheirLastActionBy   string     `json:"their_last_action_by"`
+	// Participants counts attributed non-bot activity (commits, reviews,
+	// comments) per login, excluding me — who is on the other side of this
+	// PR, weighted by how active they've been.
+	Participants map[string]int `json:"participants,omitempty"`
+	NewSinceMe   Counts         `json:"new_since_me"`
+	ForcePushed  bool           `json:"force_pushed"`
+	WaitingOnMe  bool           `json:"waiting_on_me"`
+	Muted        bool           `json:"muted"`
 
 	DirectReviewRequest    bool `json:"direct_review_request"`
 	CodeOwnerReviewRequest bool `json:"code_owner_review_request"`
@@ -207,6 +212,10 @@ func Derive(pr ghclient.PullRequest, prev *PR, me string, isBot func(string) boo
 			if their == nil || e.at.After(their.at) {
 				their = e
 			}
+			if p.Participants == nil {
+				p.Participants = map[string]int{}
+			}
+			p.Participants[e.login]++
 		}
 	}
 
@@ -263,7 +272,7 @@ func Derive(pr ghclient.PullRequest, prev *PR, me string, isBot func(string) boo
 			my = &event{login: me, at: *prev.MyLastActionAt, kind: prev.MyLastActionKind}
 		}
 		if prev.TheirLastActionAt != nil && (their == nil || their.at.Before(*prev.TheirLastActionAt)) {
-			their = &event{at: *prev.TheirLastActionAt, kind: prev.TheirLastActionKind}
+			their = &event{login: prev.TheirLastActionBy, at: *prev.TheirLastActionAt, kind: prev.TheirLastActionKind}
 		}
 	}
 
@@ -276,6 +285,7 @@ func Derive(pr ghclient.PullRequest, prev *PR, me string, isBot func(string) boo
 		t := their.at
 		p.TheirLastActionAt = &t
 		p.TheirLastActionKind = their.kind
+		p.TheirLastActionBy = their.login
 	}
 
 	p.WaitingOnMe = their != nil && (my == nil || their.at.After(my.at))

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 const helpText = "↑↓ nav · enter web · o gh · e engage · a ack · s snooze · i info · r poll · / search · 1-7 filter · q quit"
 
 type cols struct {
-	repo, title, role, since, new, flags int
+	repo, title, role, who, since, new, flags int
 }
 
 func (m Model) View() string {
@@ -58,7 +59,7 @@ func (m Model) View() string {
 
 	c := m.columns(width)
 	hdr := " " + pad("", 1) + " " + pad("repo#pr", c.repo) + " " + pad("title", c.title) + " " +
-		pad("role", c.role) + " " + pad("since", c.since) + " " + pad("new", c.new) + " " + pad("⌘", c.flags)
+		pad("role", c.role) + " " + pad("who", c.who) + " " + pad("since", c.since) + " " + pad("new", c.new) + " " + pad("⌘", c.flags)
 	lines = append(lines, styColHead.Render(hdr))
 
 	vh := m.viewportHeight()
@@ -116,9 +117,9 @@ func (m Model) columns(width int) cols {
 		}
 	}
 	repo = min(repo, 26)
-	c := cols{repo: repo, role: 4, since: 5, new: 10, flags: 3}
-	// margins + separators eat 9 columns
-	c.title = max(width-c.repo-c.role-c.since-c.new-c.flags-9, 8)
+	c := cols{repo: repo, role: 4, who: 12, since: 5, new: 10, flags: 3}
+	// margins + separators eat 10 columns
+	c.title = max(width-c.repo-c.role-c.who-c.since-c.new-c.flags-10, 8)
 	return c
 }
 
@@ -185,18 +186,30 @@ func (m Model) renderRow(p *derive.PR, selected bool, c cols, now time.Time) str
 		flags += " "
 	}
 
+	// The counterpart: whoever acted last on their side; for rows where
+	// that's unknown (unattributed commits) fall back to the PR author when
+	// it isn't me.
+	who := p.TheirLastActionBy
+	if who == "" && p.Role == "reviewer" {
+		who = p.Author
+	}
+	if who == "" {
+		who = "—"
+	}
+
 	repoC := pad(shortKey(p), c.repo)
 	titleC := pad(title, c.title)
 	roleC := pad(role, c.role)
+	whoC := pad(who, c.who)
 	sinceC := pad(humanSince(sinceD), c.since)
 	newC := pad(newStr, c.new)
 	flagsC := pad(flags, c.flags)
 
 	if selected {
-		return stySelected.Render(" " + dot + " " + repoC + " " + titleC + " " + roleC + " " + sinceC + " " + newC + " " + flagsC)
+		return stySelected.Render(" " + dot + " " + repoC + " " + titleC + " " + roleC + " " + whoC + " " + sinceC + " " + newC + " " + flagsC)
 	}
 	if st == derive.StatusSnoozed || st == derive.StatusMuted {
-		return styDim.Render(" " + dot + " " + repoC + " " + titleC + " " + roleC + " " + sinceC + " " + newC + " " + flagsC)
+		return styDim.Render(" " + dot + " " + repoC + " " + titleC + " " + roleC + " " + whoC + " " + sinceC + " " + newC + " " + flagsC)
 	}
 
 	dotS := styDotThem.Render(dot)
@@ -222,14 +235,14 @@ func (m Model) renderRow(p *derive.PR, selected bool, c cols, now time.Time) str
 	} else if p.NewSinceMe.Total() == 0 {
 		newS = styDim.Render(newC)
 	}
-	return " " + dotS + " " + repoC + " " + titleC + " " + roleS + " " + sinceS + " " + newS + " " + styMark.Render(flagsC)
+	return " " + dotS + " " + repoC + " " + titleC + " " + roleS + " " + whoC + " " + sinceS + " " + newS + " " + styMark.Render(flagsC)
 }
 
 func (m Model) detailLines(width int, now time.Time) []string {
 	lines := []string{styDim.Render(strings.Repeat("─", max(width, 1)))}
 	p := m.selected()
 	if p == nil {
-		lines = append(lines, styDim.Render(" no selection"), "", "", "", "")
+		lines = append(lines, styDim.Render(" no selection"), "", "", "", "", "")
 		return lines
 	}
 
@@ -261,11 +274,38 @@ func (m Model) detailLines(width int, now time.Time) []string {
 	}
 	theirs := "—"
 	if p.TheirLastActionAt != nil {
-		theirs = fmt.Sprintf("%s @ %s (%s ago)", p.TheirLastActionKind, p.TheirLastActionAt.Local().Format("Jan 2 15:04"), humanSince(now.Sub(*p.TheirLastActionAt)))
+		by := ""
+		if p.TheirLastActionBy != "" {
+			by = " by " + p.TheirLastActionBy
+		}
+		theirs = fmt.Sprintf("%s%s @ %s (%s ago)", p.TheirLastActionKind, by, p.TheirLastActionAt.Local().Format("Jan 2 15:04"), humanSince(now.Sub(*p.TheirLastActionAt)))
 	}
 	sha := p.HeadSHA
 	if len(sha) > 12 {
 		sha = sha[:12]
+	}
+
+	people := "author " + p.Author
+	if len(p.Participants) > 0 {
+		type pc struct {
+			login string
+			n     int
+		}
+		pcs := make([]pc, 0, len(p.Participants))
+		for l, n := range p.Participants {
+			pcs = append(pcs, pc{l, n})
+		}
+		sort.Slice(pcs, func(i, j int) bool {
+			if pcs[i].n != pcs[j].n {
+				return pcs[i].n > pcs[j].n
+			}
+			return pcs[i].login < pcs[j].login
+		})
+		parts := make([]string, 0, len(pcs))
+		for _, x := range pcs {
+			parts = append(parts, fmt.Sprintf("%s×%d", x.login, x.n))
+		}
+		people += " · active: " + strings.Join(parts, " ")
 	}
 
 	kv := func(k, v string) string {
@@ -276,6 +316,7 @@ func (m Model) detailLines(width int, now time.Time) []string {
 		kv("url", p.URL),
 		kv("worktree", p.WorktreePath+" ("+wtNote+")"),
 		kv("session", session),
+		kv("people", people),
 		kv("actions", "mine: "+mine+" · theirs: "+theirs+" · "+p.ReviewDecision+" · head "+sha+involve),
 	)
 	return lines

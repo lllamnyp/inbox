@@ -275,6 +275,11 @@ Rough sketch:
 ```
 
 - `⎇` = worktree exists; `⌗` = live Claude Code session detected.
+- A `who` column (not in the sketch above) names the counterpart — whoever
+  acted last on their side: the reviewer sending comments on your PR, or the
+  author pushing fixes on theirs. The `i` detail pane carries the full
+  breakdown: PR author plus every attributed non-bot participant with an
+  activity count (`androndo×6 lexfrei×5`).
 - Default sort: waiting-on-you first, then `their_last_action_at` desc.
 - Filters as keybinds `1`..`7` (all / mine / reviewing / waiting-you /
   waiting-them / snoozed / muted). Muted rows show only under `7`.

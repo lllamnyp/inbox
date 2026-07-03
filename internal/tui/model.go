@@ -239,7 +239,7 @@ func (m *Model) viewportHeight() int {
 	}
 	h -= 5 // header + filter + column header + status + help
 	if m.showDetail {
-		h -= 6
+		h -= 7
 	}
 	if h < 1 {
 		h = 1

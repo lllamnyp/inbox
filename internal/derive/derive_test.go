@@ -52,8 +52,15 @@ func TestWaitingOnMe(t *testing.T) {
 	addCommit(&g, "alice", at(0), "sha1")
 	addReview(&g, "me", at(1))
 	addComment(&g, "alice", at(2))
+	addComment(&g, "coderabbitai", at(3))
 
 	p := Derive(g, nil, "me", isBot, at(3))
+	if p.TheirLastActionBy != "alice" {
+		t.Errorf("their_last_action_by = %q, want alice", p.TheirLastActionBy)
+	}
+	if len(p.Participants) != 1 || p.Participants["alice"] != 2 {
+		t.Errorf("participants = %v, want alice×2 (bots excluded)", p.Participants)
+	}
 	if p.Role != "reviewer" {
 		t.Errorf("role = %q, want reviewer", p.Role)
 	}
@@ -186,6 +193,9 @@ func TestMonotonicCarry(t *testing.T) {
 	p := Derive(g2, prev, "me", isBot, at(10))
 	if p.TheirLastActionAt == nil || !p.TheirLastActionAt.Equal(at(8)) {
 		t.Errorf("their_last_action_at regressed: %v, want %v", p.TheirLastActionAt, at(8))
+	}
+	if p.TheirLastActionBy != "alice" {
+		t.Errorf("their_last_action_by lost in carry: %q, want alice", p.TheirLastActionBy)
 	}
 }
 
