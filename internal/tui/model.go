@@ -47,8 +47,11 @@ type Model struct {
 	searching bool
 
 	showDetail bool
-	status     string // transient message (engage result, save errors, ...)
-	pollErr    string
+	showLog    bool
+	status     string    // transient message (engage result, save errors, ...)
+	statusAt   time.Time // status fades from the dashboard after statusTTL
+	events     []string  // rolling log of everything status-worthy, newest last
+	pollErr    string    // ongoing condition, shown while it persists
 
 	width, height int
 	now           time.Time
@@ -268,6 +271,28 @@ func (m *Model) clampScroll() {
 
 func (m *Model) saveState() {
 	if err := m.st.Save(m.statePath); err != nil {
-		m.status = "save failed: " + err.Error()
+		m.setStatus("save failed: " + err.Error())
+	}
+}
+
+// statusTTL is how long a transient message stays on the dashboard; the full
+// history stays in the log (l).
+const statusTTL = 5 * time.Second
+
+const maxLogEntries = 200
+
+// setStatus shows an ephemeral message on the dashboard and records it in
+// the log.
+func (m *Model) setStatus(msg string) {
+	m.status = msg
+	m.statusAt = time.Now()
+	m.logLine(msg)
+}
+
+// logLine records a message in the log without touching the dashboard.
+func (m *Model) logLine(msg string) {
+	m.events = append(m.events, time.Now().Format("15:04:05")+" "+msg)
+	if len(m.events) > maxLogEntries {
+		m.events = m.events[len(m.events)-maxLogEntries:]
 	}
 }

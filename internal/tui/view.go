@@ -12,7 +12,7 @@ import (
 	"github.com/lllamnyp/inbox/internal/derive"
 )
 
-const helpText = "↑↓ nav · enter web · o gh · e engage · a ack · s snooze · i info · r poll · / search · 1-7 filter · q quit"
+const helpText = "↑↓ nav · enter web · o gh · e engage · a ack · s snooze · i info · l log · r poll · / search · 1-7 filter · q quit"
 
 type cols struct {
 	repo, title, role, who, since, new, flags int
@@ -57,18 +57,29 @@ func (m Model) View() string {
 
 	lines = append(lines, m.filterLine(width))
 
-	c := m.columns(width)
-	hdr := " " + pad("", 1) + " " + pad("repo#pr", c.repo) + " " + pad("title", c.title) + " " +
-		pad("role", c.role) + " " + pad("who", c.who) + " " + pad("since", c.since) + " " + pad("new", c.new) + " " + pad("⌘", c.flags)
-	lines = append(lines, styColHead.Render(hdr))
-
 	vh := m.viewportHeight()
-	if len(m.rows) == 0 {
-		lines = append(lines, styDim.Render("  nothing to show — r to poll · 1 to reset the filter"))
+	if m.showLog {
+		lines = append(lines, styColHead.Render(" recent log — l or esc to close"))
+		start := max(len(m.events)-vh, 0)
+		for _, e := range m.events[start:] {
+			lines = append(lines, styDim.Render(ansi.Truncate(" "+e, width, "…")))
+		}
+		if len(m.events) == 0 {
+			lines = append(lines, styDim.Render("  nothing logged yet"))
+		}
 	} else {
-		end := min(m.offset+vh, len(m.rows))
-		for i := m.offset; i < end; i++ {
-			lines = append(lines, m.renderRow(m.rows[i], i == m.cursor, c, now))
+		c := m.columns(width)
+		hdr := " " + pad("", 1) + " " + pad("repo#pr", c.repo) + " " + pad("title", c.title) + " " +
+			pad("role", c.role) + " " + pad("who", c.who) + " " + pad("since", c.since) + " " + pad("new", c.new) + " " + pad("⌘", c.flags)
+		lines = append(lines, styColHead.Render(hdr))
+
+		if len(m.rows) == 0 {
+			lines = append(lines, styDim.Render("  nothing to show — r to poll · 1 to reset the filter"))
+		} else {
+			end := min(m.offset+vh, len(m.rows))
+			for i := m.offset; i < end; i++ {
+				lines = append(lines, m.renderRow(m.rows[i], i == m.cursor, c, now))
+			}
 		}
 	}
 	for len(lines) < 3+vh {
@@ -82,7 +93,7 @@ func (m Model) View() string {
 	switch {
 	case m.pollErr != "":
 		lines = append(lines, styErr.Render(ansi.Truncate(" poll error: "+m.pollErr, width, "…")))
-	case m.status != "":
+	case m.status != "" && now.Sub(m.statusAt) < statusTTL:
 		lines = append(lines, styOK.Render(ansi.Truncate(" "+m.status, width, "…")))
 	default:
 		lines = append(lines, "")

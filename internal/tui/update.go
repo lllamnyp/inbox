@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,8 +32,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.polling = false
 		m.lastPollDone = time.Now()
 		if msg.err != nil {
+			if m.pollErr == "" {
+				m.logLine("poll error: " + msg.err.Error())
+			}
 			m.pollErr = msg.err.Error()
 			return m, nil
+		}
+		if m.pollErr != "" {
+			m.logLine("poll recovered")
 		}
 		m.pollErr = ""
 		fp := fingerprint(msg.prs)
@@ -41,6 +48,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.unchanged = 0
 			m.fingerprint = fp
+			m.logLine(fmt.Sprintf("poll: %d PRs, activity changed", len(msg.prs)))
 		}
 		m.st.MyLogin = msg.login
 		m.st.LastPollAt = time.Now()
@@ -54,10 +62,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case engageResult:
+		for line := range strings.Lines(msg.log) {
+			if line = strings.TrimRight(line, "\n"); line != "" {
+				m.logLine("engage: " + line)
+			}
+		}
 		if msg.err != nil {
-			m.status = "engage failed: " + msg.err.Error()
+			m.setStatus("engage failed: " + msg.err.Error())
 		} else {
-			m.status = "engaged: " + msg.path
+			m.setStatus("engaged: " + msg.path)
 			if p, ok := m.st.PRs[msg.key]; ok {
 				worktree.NewScanner().Annotate(p)
 				m.saveState()
@@ -68,7 +81,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case execDoneMsg:
 		if msg.err != nil {
-			m.status = msg.err.Error()
+			m.setStatus(msg.err.Error())
 		}
 		return m, nil
 
@@ -139,6 +152,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		m.status = ""
+		m.showLog = false
 		if m.search.Value() != "" {
 			m.search.SetValue("")
 			m.rebuild()
@@ -157,7 +171,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "e": // engage: create the worktree, check out the PR
 		if p := m.selected(); p != nil {
-			m.status = "engaging " + p.Key() + "…"
+			m.setStatus("engaging " + p.Key() + "…")
 			return m, engageCmd(p)
 		}
 
@@ -165,10 +179,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if p := m.selected(); p != nil {
 			if p.AcknowledgedAt != nil && (p.TheirLastActionAt == nil || !p.TheirLastActionAt.After(*p.AcknowledgedAt)) {
 				p.AcknowledgedAt = nil
-				m.status = "unread: " + p.Key()
+				m.setStatus("unread: " + p.Key())
 			} else {
 				p.AcknowledgedAt = new(time.Now())
-				m.status = "acked: " + p.Key()
+				m.setStatus("acked: " + p.Key())
 			}
 			m.saveState()
 			m.rebuild()
@@ -178,10 +192,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if p := m.selected(); p != nil {
 			if p.SnoozedUntil != nil && time.Now().Before(*p.SnoozedUntil) {
 				p.SnoozedUntil = nil
-				m.status = "unsnoozed: " + p.Key()
+				m.setStatus("unsnoozed: " + p.Key())
 			} else {
 				p.SnoozedUntil = new(time.Now().Add(24 * time.Hour))
-				m.status = fmt.Sprintf("snoozed until %s: %s", p.SnoozedUntil.Format("Jan 2 15:04"), p.Key())
+				m.setStatus(fmt.Sprintf("snoozed until %s: %s", p.SnoozedUntil.Format("Jan 2 15:04"), p.Key()))
 			}
 			m.saveState()
 			m.rebuild()
@@ -195,6 +209,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		m.showDetail = !m.showDetail
 		m.clampScroll()
+
+	case "l": // recent log in place of the table
+		m.showLog = !m.showLog
 	}
 	return m, nil
 }
