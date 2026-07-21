@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -262,12 +263,27 @@ func (m Model) detailLines(width int, now time.Time) []string {
 		wtNote = "exists"
 	}
 	session := "—"
-	if p.ClaudeSessionID != "" {
-		if p.SessionFresh {
-			session = p.ClaudeSessionID + " (fresh)"
-		} else {
-			session = p.ClaudeSessionID + " (idle)"
+	if n := len(p.ClaudeSessions); n > 0 {
+		var parts []string
+		for i, s := range p.ClaudeSessions {
+			if i == 3 {
+				parts = append(parts, fmt.Sprintf("+%d more", n-i))
+				break
+			}
+			id := s.ID
+			if len(id) > 8 {
+				id = id[:8]
+			}
+			state := "idle"
+			if s.Fresh {
+				state = "fresh"
+			}
+			if s.CWD != "" {
+				state += ", " + filepath.Base(s.CWD)
+			}
+			parts = append(parts, id+" ("+state+")")
 		}
+		session = strings.Join(parts, " · ")
 	}
 	involve := ""
 	switch {

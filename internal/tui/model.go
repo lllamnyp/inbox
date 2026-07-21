@@ -15,6 +15,7 @@ import (
 	"github.com/lllamnyp/inbox/internal/derive"
 	"github.com/lllamnyp/inbox/internal/ghclient"
 	"github.com/lllamnyp/inbox/internal/state"
+	"github.com/lllamnyp/inbox/internal/worktree"
 )
 
 type Filter int
@@ -36,6 +37,7 @@ type Model struct {
 	st           *state.State
 	client       *ghclient.Client
 	isBot        func(string) bool
+	ix           *worktree.SessionIndex
 	baseInterval time.Duration
 
 	rows   []*derive.PR // filtered + sorted view over st.PRs
@@ -74,6 +76,7 @@ func New(st *state.State, statePath string, client *ghclient.Client, isBot func(
 		st:            st,
 		client:        client,
 		isBot:         isBot,
+		ix:            worktree.NewSessionIndex(),
 		baseInterval:  interval,
 		search:        ti,
 		now:           time.Now(),
@@ -85,7 +88,7 @@ func New(st *state.State, statePath string, client *ghclient.Client, isBot func(
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(pollCmd(m.client), tick())
+	return tea.Batch(pollCmd(m.client, m.ix), tick())
 }
 
 // --- messages ---
@@ -113,8 +116,11 @@ func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func pollCmd(client *ghclient.Client) tea.Cmd {
+func pollCmd(client *ghclient.Client, ix *worktree.SessionIndex) tea.Cmd {
 	return func() tea.Msg {
+		// The transcript scan happens off the UI thread: the first pass
+		// walks every session file, later passes only touch changed ones.
+		ix.Refresh()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		login, prs, err := client.Fetch(ctx)

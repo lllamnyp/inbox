@@ -64,8 +64,10 @@ func main() {
 		st.LastPollAt = time.Now()
 		st.PRs = derive.ApplyAll(st.PRs, login, prs, isBot, time.Now())
 		sc := worktree.NewScanner()
+		ix := worktree.NewSessionIndex()
+		ix.Refresh()
 		for _, p := range st.PRs {
-			sc.Annotate(p)
+			sc.Annotate(p, ix)
 		}
 		if err := st.Save(path); err != nil {
 			fmt.Fprintln(os.Stderr, "inbox: warning: state not saved:", err)

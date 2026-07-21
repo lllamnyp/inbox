@@ -319,9 +319,25 @@ outside `[a-zA-Z0-9]` with `-` (not just `/` — dots too), so an absolute path
 like `/home/lllamnyp/Cloud/dev/github.com/foo/bar-42` becomes
 `-home-lllamnyp-Cloud-dev-github-com-foo-bar-42` (note `github-com`). Each
 session is a `<uuid>.jsonl` file whose first line is a metadata record and
-whose subsequent lines are the individual turns. Resolution: encode the
-worktree path, then pick the `.jsonl` in the resulting directory with the
-newest mtime.
+whose subsequent lines are the individual turns.
+
+**Session ↔ PR association is transcript-driven.** Claude Code writes a
+`pr-link` record (`{prNumber, prRepository, prUrl, timestamp}`) into the
+transcript every time a session touches a PR — the same data its agents view
+shows in the PR column. A poll-time index scans transcripts for these
+records, so the mapping survives arbitrary worktree names
+(`repo-pr-review-123` from an orchestrator, not just `repo-123`), captures
+sessions that handle several PRs at once, and attaches multiple sessions to
+one PR. The turn records also carry `cwd`, which doubles as a last-resort
+worktree resolver: if neither the naming convention nor the branch scan
+finds a worktree, a pr-linked session's cwd that exists on disk wins.
+
+Scan cost: transcripts are a few hundred MB across ~150 files here; each
+file is re-parsed only when its `(size, mtime)` changes, and the scan runs
+in the poll goroutine, so the first poll pays ~a second and later polls
+touch only active sessions. Sessions whose transcripts predate `pr-link`
+records fall back to the old association — newest `.jsonl` in the resolved
+worktree's own project dir.
 
 Freshness heuristic: treat a session as "live-looking" if its `mtime` is
 within the last hour; otherwise treat it as "resumable but idle". No attempt
@@ -329,10 +345,11 @@ to detect a running Claude Code process — process detection is fragile across
 IDE integrations and remote hosts, and the mtime signal is enough for the
 "do I have an in-flight session on this PR" question.
 
-Both attach to the PR row: worktree path and session UUID. Two icon columns
-(`⎇` worktree exists, `⌗` recent session exists) so the whole `session-id/path`
-string doesn't dominate the layout; press `i` on a row to open a footer detail
-pane with the full strings.
+Both attach to the PR row: worktree path and session list (`claude_sessions`
+in the state file). Two icon columns (`⎇` worktree exists, `⌗` fresh session
+exists) so the whole `session-id/path` string doesn't dominate the layout;
+press `i` on a row to open a footer detail pane with the full strings —
+`d0eea128 (fresh, cozyportal-iam-cutover) · 664457ad (idle, …)`.
 
 ## `engage` command
 

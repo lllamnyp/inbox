@@ -55,7 +55,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.st.PRs = derive.ApplyAll(m.st.PRs, msg.login, msg.prs, m.isBot, time.Now())
 		sc := worktree.NewScanner()
 		for _, p := range m.st.PRs {
-			sc.Annotate(p)
+			sc.Annotate(p, m.ix)
 		}
 		m.saveState()
 		m.rebuild()
@@ -72,7 +72,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus("engaged: " + msg.path)
 			if p, ok := m.st.PRs[msg.key]; ok {
-				worktree.NewScanner().Annotate(p)
+				worktree.NewScanner().Annotate(p, m.ix)
 				m.saveState()
 				m.rebuild()
 			}
@@ -94,7 +94,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) startPoll() tea.Cmd {
 	m.polling = true
 	m.lastPollStart = time.Now()
-	return pollCmd(m.client)
+	return pollCmd(m.client, m.ix)
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

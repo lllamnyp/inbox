@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -62,22 +63,25 @@ func encodeProjectDir(path string) string {
 	}, path)
 }
 
-// ClaudeSession finds the newest Claude Code session for a worktree.
-// Sessions are <uuid>.jsonl files under ~/.claude/projects/<encoded-cwd>/.
-// A session is "fresh" (live-looking) if its mtime is within the last hour —
-// no process detection, the mtime signal is enough.
-func ClaudeSession(worktreePath string) (id string, fresh bool, ok bool) {
+// sessionFreshness is the "live-looking" window: no process detection, an
+// mtime within the last hour is enough.
+const sessionFreshness = time.Hour
+
+// ClaudeSession finds the newest Claude Code session in a worktree's own
+// project dir (~/.claude/projects/<encoded-cwd>/, <uuid>.jsonl files). This
+// is the fallback association for transcripts predating pr-link records;
+// the SessionIndex is the primary mechanism.
+func ClaudeSession(worktreePath string) (id string, mtime time.Time, ok bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", false, false
+		return "", time.Time{}, false
 	}
 	enc := encodeProjectDir(worktreePath)
 	dir := filepath.Join(home, ".claude", "projects", enc)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", false, false
+		return "", time.Time{}, false
 	}
-	var newest time.Time
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
@@ -86,15 +90,12 @@ func ClaudeSession(worktreePath string) (id string, fresh bool, ok bool) {
 		if err != nil {
 			continue
 		}
-		if id == "" || info.ModTime().After(newest) {
-			newest = info.ModTime()
+		if id == "" || info.ModTime().After(mtime) {
+			mtime = info.ModTime()
 			id = strings.TrimSuffix(e.Name(), ".jsonl")
 		}
 	}
-	if id == "" {
-		return "", false, false
-	}
-	return id, time.Since(newest) <= time.Hour, true
+	return id, mtime, id != ""
 }
 
 // Scanner resolves PRs to worktrees, memoizing the sibling-directory scan so
@@ -197,14 +198,62 @@ func branchCompatible(branch, headRef string) bool {
 		(headRef != "" && strings.HasSuffix(branch, "/"+headRef))
 }
 
-// Annotate fills the worktree/session fields of a derived PR row.
-func (s *Scanner) Annotate(p *derive.PR) {
-	p.WorktreePath, p.WorktreeExists = s.Resolve(p.URL, p.Repo, p.Number, p.HeadRefName)
-	if id, fresh, ok := ClaudeSession(p.WorktreePath); ok {
-		p.ClaudeSessionID = id
-		p.SessionFresh = fresh
-	} else {
-		p.ClaudeSessionID = ""
-		p.SessionFresh = false
+// Annotate fills the worktree/session fields of a derived PR row from the
+// naming/branch scan plus the transcript index.
+func (s *Scanner) Annotate(p *derive.PR, ix *SessionIndex) {
+	primary, _ := Paths(p.URL, p.Repo, p.Number)
+	path, exists := s.Resolve(p.URL, p.Repo, p.Number, p.HeadRefName)
+
+	var sessions []SessionInfo
+	if ix != nil {
+		sessions = ix.SessionsFor(p.Key())
+	}
+
+	// A pr-linked session's cwd can reveal a worktree the naming convention
+	// and branch scan miss (orchestrators create repo-pr-review-123, and
+	// may leave it on a detached HEAD or an oddly named branch).
+	if !exists {
+		for _, si := range sessions { // newest first
+			if si.CWD != "" && si.CWD != primary && Exists(si.CWD) {
+				path, exists = si.CWD, true
+				break
+			}
+		}
+	}
+	p.WorktreePath, p.WorktreeExists = path, exists
+
+	refs := make([]derive.SessionRef, 0, len(sessions)+1)
+	seen := map[string]bool{}
+	for _, si := range sessions {
+		refs = append(refs, derive.SessionRef{
+			ID:         si.ID,
+			CWD:        si.CWD,
+			LastActive: si.Mtime,
+			Fresh:      time.Since(si.Mtime) <= sessionFreshness,
+		})
+		seen[si.ID] = true
+	}
+	// Fallback for transcripts without pr-link records: newest session in
+	// the worktree's own project dir.
+	if id, mtime, ok := ClaudeSession(path); ok && !seen[id] {
+		refs = append(refs, derive.SessionRef{
+			ID:         id,
+			CWD:        path,
+			LastActive: mtime,
+			Fresh:      time.Since(mtime) <= sessionFreshness,
+		})
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].LastActive.After(refs[j].LastActive) })
+
+	p.ClaudeSessions = refs
+	p.ClaudeSessionID = ""
+	p.SessionFresh = false
+	if len(refs) > 0 {
+		p.ClaudeSessionID = refs[0].ID
+		for _, r := range refs {
+			if r.Fresh {
+				p.SessionFresh = true
+			}
+		}
 	}
 }

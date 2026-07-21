@@ -97,8 +97,21 @@ type PR struct {
 
 	WorktreePath    string `json:"worktree_path"`
 	WorktreeExists  bool   `json:"worktree_exists"`
-	ClaudeSessionID string `json:"claude_session_id"`
+	ClaudeSessionID string `json:"claude_session_id"` // newest associated session
 	SessionFresh    bool   `json:"claude_session_fresh"`
+	// ClaudeSessions lists every session associated with this PR (via
+	// pr-link transcript records, plus the worktree-dir fallback), newest
+	// first. One orchestrated PR can have several; one session can appear
+	// under several PRs.
+	ClaudeSessions []SessionRef `json:"claude_sessions,omitempty"`
+}
+
+// SessionRef is one Claude Code session attached to a PR row.
+type SessionRef struct {
+	ID         string    `json:"id"`
+	CWD        string    `json:"cwd,omitempty"`
+	LastActive time.Time `json:"last_active"`
+	Fresh      bool      `json:"fresh"`
 }
 
 func (p *PR) Key() string { return p.Repo + "#" + strconv.Itoa(p.Number) }
@@ -195,6 +208,7 @@ func Derive(pr ghclient.PullRequest, prev *PR, me string, isBot func(string) boo
 		p.WorktreeExists = prev.WorktreeExists
 		p.ClaudeSessionID = prev.ClaudeSessionID
 		p.SessionFresh = prev.SessionFresh
+		p.ClaudeSessions = prev.ClaudeSessions
 	}
 
 	evs := events(pr)
