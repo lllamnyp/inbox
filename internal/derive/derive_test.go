@@ -289,3 +289,40 @@ func TestSnooze(t *testing.T) {
 		t.Error("snooze expired and they acted last; want waiting-on-you")
 	}
 }
+
+func ref(p ghclient.PullRequest) ghclient.PRRef {
+	var r ghclient.PRRef
+	r.Number = p.Number
+	r.UpdatedAt = p.UpdatedAt
+	r.Repository.NameWithOwner = p.Repository.NameWithOwner
+	return r
+}
+
+func TestMergeKeepsUnfetchedAndDropsUnlisted(t *testing.T) {
+	a, b, c := pr(), pr(), pr()
+	b.Number, c.Number = 2, 3
+	a.UpdatedAt, b.UpdatedAt, c.UpdatedAt = at(1), at(1), at(1)
+	prev := Merge(nil, "me", []ghclient.PRRef{ref(a), ref(b)}, []ghclient.PullRequest{a, b}, isBot, at(2))
+
+	// Next round: a is unchanged (not refetched), b closed (unlisted), c is
+	// new but still queued (listed, not fetched).
+	next := Merge(prev, "me", []ghclient.PRRef{ref(a), ref(c)}, nil, isBot, at(3))
+	if next["org/repo#1"] != prev["org/repo#1"] {
+		t.Error("unfetched listed PR should keep its previous record")
+	}
+	if _, ok := next["org/repo#2"]; ok {
+		t.Error("unlisted PR should drop out")
+	}
+	if _, ok := next["org/repo#3"]; ok {
+		t.Error("listed PR without a payload yet should not appear")
+	}
+
+	c.Title = "fresh"
+	next = Merge(next, "me", []ghclient.PRRef{ref(a), ref(c)}, []ghclient.PullRequest{c}, isBot, at(4))
+	if next["org/repo#3"] == nil || next["org/repo#3"].Title != "fresh" {
+		t.Error("fetched PR should be derived from its payload")
+	}
+	if got := Known(next)["org/repo#3"]; !got.Equal(at(1)) {
+		t.Errorf("Known should report the derived updatedAt, got %v", got)
+	}
+}

@@ -4,7 +4,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -62,6 +61,7 @@ type Model struct {
 	lastPollStart time.Time
 	lastPollDone  time.Time
 	unchanged     int // consecutive polls with an unchanged updatedAt set
+	backlog       int // stale PRs the last round left for the next one
 	fingerprint   string
 }
 
@@ -88,17 +88,17 @@ func New(st *state.State, statePath string, client *ghclient.Client, isBot func(
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(pollCmd(m.client, m.ix), tick())
+	return tea.Batch(pollCmd(m.client, m.ix, derive.Known(m.st.PRs)), tick())
 }
 
 // --- messages ---
 
 type tickMsg time.Time
 
+// pollResult is one sync round; res may be a partial round alongside err.
 type pollResult struct {
-	login string
-	prs   []ghclient.PullRequest
-	err   error
+	res *ghclient.SyncResult
+	err error
 }
 
 type engageResult struct {
@@ -116,15 +116,15 @@ func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func pollCmd(client *ghclient.Client, ix *worktree.SessionIndex) tea.Cmd {
+// pollCmd runs one sync round. known is snapshotted on the UI thread; the
+// round itself is bounded by ghclient's per-request deadlines and batch cap.
+func pollCmd(client *ghclient.Client, ix *worktree.SessionIndex, known map[string]time.Time) tea.Cmd {
 	return func() tea.Msg {
 		// The transcript scan happens off the UI thread: the first pass
 		// walks every session file, later passes only touch changed ones.
 		ix.Refresh()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		login, prs, err := client.Fetch(ctx)
-		return pollResult{login: login, prs: prs, err: err}
+		res, err := client.Sync(context.Background(), known, ghclient.BatchesPerRound)
+		return pollResult{res: res, err: err}
 	}
 }
 
@@ -139,10 +139,10 @@ func (m Model) currentInterval() time.Duration {
 	return m.baseInterval
 }
 
-func fingerprint(prs []ghclient.PullRequest) string {
-	keys := make([]string, 0, len(prs))
-	for _, p := range prs {
-		keys = append(keys, fmt.Sprintf("%s#%d@%s", p.Repository.NameWithOwner, p.Number, p.UpdatedAt.Format(time.RFC3339)))
+func fingerprint(refs []ghclient.PRRef) string {
+	keys := make([]string, 0, len(refs))
+	for _, r := range refs {
+		keys = append(keys, r.Key()+"@"+r.UpdatedAt.Format(time.RFC3339))
 	}
 	sort.Strings(keys)
 	return strings.Join(keys, "\n")

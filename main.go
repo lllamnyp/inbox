@@ -58,11 +58,24 @@ func main() {
 	die(err)
 
 	if *jsonMode {
-		login, prs, err := client.Fetch(ctx)
-		die(err)
-		st.MyLogin = login
-		st.LastPollAt = time.Now()
-		st.PRs = derive.ApplyAll(st.PRs, login, prs, isBot, time.Now())
+		// Rounds until caught up; state is saved after each, so an
+		// interrupted catch-up resumes where it stopped.
+		for {
+			res, err := client.Sync(ctx, derive.Known(st.PRs), ghclient.BatchesPerRound)
+			if res != nil {
+				st.MyLogin = res.Login
+				st.LastPollAt = time.Now()
+				st.PRs = derive.Merge(st.PRs, res.Login, res.Open, res.PRs, isBot, time.Now())
+				if err := st.Save(path); err != nil {
+					fmt.Fprintln(os.Stderr, "inbox: warning: state not saved:", err)
+				}
+			}
+			die(err)
+			if res.Remaining == 0 {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "inbox: catching up, %d PRs left\n", res.Remaining)
+		}
 		sc := worktree.NewScanner()
 		ix := worktree.NewSessionIndex()
 		ix.Refresh()

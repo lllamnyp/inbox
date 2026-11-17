@@ -42,7 +42,9 @@ func (m Model) View() string {
 		}
 	}
 	pollStr := "last poll never"
-	if m.polling {
+	if m.polling && m.backlog > 0 {
+		pollStr = fmt.Sprintf("catching up… %d left", m.backlog)
+	} else if m.polling {
 		pollStr = "polling…"
 	} else if !m.lastPollDone.IsZero() {
 		pollStr = "last poll " + humanSince(now.Sub(m.lastPollDone)) + " ago"

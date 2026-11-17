@@ -119,8 +119,8 @@ No manual list, no per-repo config.
   since-age, role) *and* a selected-row highlight, and embedded ANSI inside
   table cells breaks the widget's row-highlight styling. `bubbles` is still
   used for the `/` search textinput.
-- **GitHub**: [`shurcooL/githubv4`][ghv4] typed GraphQL client. One query per
-  poll fetches the whole set. Auth via `$GITHUB_TOKEN` or shelling out to
+- **GitHub**: [`shurcooL/githubv4`][ghv4] typed GraphQL client. Each poll
+  lists the set cheaply and fetches full payloads only for what changed. Auth via `$GITHUB_TOKEN` or shelling out to
   `gh auth token`.
 - **State**: `encoding/json` + atomic write (`os.CreateTemp` → `os.Rename`).
 - **Config**: `os.UserHomeDir()` for the state path.
@@ -187,29 +187,47 @@ inbox/
 }
 ```
 
-## GitHub — one GraphQL query per poll
+## GitHub — incremental sync
+
+Each poll is one *round* of two steps:
+
+1. **List** the watch set — the search below, `sort:updated-desc`, 100 per
+   page, nodes carrying only `id`, repo, number and `updatedAt`. Cheap even
+   at the 1000-result search cap, and it alone decides membership: a PR
+   missing from the listing (closed, merged, no longer involving me) drops
+   out of the state.
+2. **Fetch details** for *stale* PRs only — new, or `updatedAt` later than
+   the stored record — via `nodes(ids:)`, 25 per batch, at most 4 batches
+   per round, newest activity first. A listed PR whose payload hasn't been
+   fetched yet keeps its stored record.
 
 ```graphql
-query {
-  search(query: "involves:@me is:pr is:open archived:false", type: ISSUE, first: 100) {
-    nodes { ... on PullRequest {
-      number url title isDraft state reviewDecision headRefOid updatedAt
-      repository { nameWithOwner }
-      author { login }
-      reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
-      commits(last: 30)  { nodes { commit { committedDate oid author { user { login } } } } }
-      reviews(last: 30)  { nodes { author { login } submittedAt state } }
-      comments(last: 50) { nodes { author { login } createdAt } }
-      reviewThreads(last: 30) { nodes { isResolved comments(last: 10) { nodes { author { login } createdAt } } } }
-    }}
-  }
-}
+query { search(query: "involves:@me is:pr is:open archived:false sort:updated-desc", type: ISSUE, first: 100) {
+  nodes { ... on PullRequest { id number updatedAt repository { nameWithOwner } } } } }
+
+query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest {
+  number url title isDraft state reviewDecision headRefOid headRefName updatedAt
+  repository { nameWithOwner }
+  author { login }
+  reviewRequests(first: 20) { nodes { asCodeOwner requestedReviewer { ... on User { login } } } }
+  assignees(first: 10) { nodes { login } }
+  commits(last: 30)  { nodes { commit { committedDate oid author { user { login } } } } }
+  reviews(last: 30)  { nodes { author { login } submittedAt state } }
+  comments(last: 50) { nodes { author { login } createdAt } }
+  reviewThreads(last: 30) { nodes { isResolved comments(last: 10) { nodes { author { login } createdAt } } } }
+}}}
 ```
 
-One search per poll, but paginated at 25 nodes per page: with the nested
-commit/review/comment lists, pages of 100 make GitHub's GraphQL gateway time
-out with 502s (found empirically at a 155-PR watch set — ~7 pages, ~26s).
-Still a handful of rate-limit points per poll, ≪ 5000/hr GraphQL budget.
+Every request — listing page or detail batch — gets its own 30s deadline;
+a round never shares one deadline across the whole set. Batches stay at 25:
+with the nested lists, much larger requests make GitHub's GraphQL gateway
+time out with 502s. The state file is saved after every round and the next
+round starts immediately while stale PRs remain, so a large backlog (first
+run, an old state file after months away) is worked off over a few rounds,
+most recent activity first, and resumes across launches. In steady state a
+round is the listing plus a batch for the handful of PRs that moved.
+An earlier design re-fetched every payload per poll under one 30s deadline;
+it stopped loading once the watch set grew to ~290 PRs (12 pages × ~4s).
 Bots filtered in code — reuse the pattern from `vibe-project-management`'s
 scrape: `gemini|coderabbit|netlify|[bot]|dependabot|renovate`. Override with
 `$INBOX_BOTS`.
@@ -237,6 +255,8 @@ Force-push detection: cache prior `headRefOid`; if it changes and the new tip's
   search's `updatedAt` set is unchanged for N consecutive polls; snap back to
   60s on any change.
 - `r` key forces an immediate poll.
+- While a round leaves stale PRs behind, the next round starts right away
+  (header shows `catching up… N left`) instead of waiting out the interval.
 - Poll runs in a goroutine that publishes new state via a `tea.Cmd`; the main
   loop never blocks on the network.
 

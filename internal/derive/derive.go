@@ -317,13 +317,35 @@ func Derive(pr ghclient.PullRequest, prev *PR, me string, isBot func(string) boo
 	return p
 }
 
-// ApplyAll derives the whole watch set. PRs absent from the fresh snapshot
-// (closed, merged, no longer involving me) drop out of the state.
-func ApplyAll(prev map[string]*PR, me string, prs []ghclient.PullRequest, isBot func(string) bool, now time.Time) map[string]*PR {
-	next := make(map[string]*PR, len(prs))
-	for _, gpr := range prs {
-		key := gpr.Repository.NameWithOwner + "#" + strconv.Itoa(gpr.Number)
-		next[key] = Derive(gpr, prev[key], me, isBot, now)
+// Merge folds one sync round into the state. open is the complete current
+// watch set; fetched carries fresh payloads for a subset of it. A listed PR
+// without a fresh payload keeps its previous record — unchanged since, or
+// queued for a later round — and a listed PR never seen before stays out
+// until its payload arrives. PRs absent from open (closed, merged, no longer
+// involving me) drop out.
+func Merge(prev map[string]*PR, me string, open []ghclient.PRRef, fetched []ghclient.PullRequest, isBot func(string) bool, now time.Time) map[string]*PR {
+	fresh := make(map[string]ghclient.PullRequest, len(fetched))
+	for _, gpr := range fetched {
+		fresh[gpr.Repository.NameWithOwner+"#"+strconv.Itoa(gpr.Number)] = gpr
+	}
+	next := make(map[string]*PR, len(open))
+	for _, r := range open {
+		key := r.Key()
+		if gpr, ok := fresh[key]; ok {
+			next[key] = Derive(gpr, prev[key], me, isBot, now)
+		} else if p, ok := prev[key]; ok {
+			next[key] = p
+		}
 	}
 	return next
+}
+
+// Known maps each stored PR to the updatedAt its record was derived from,
+// which is what Sync compares the listing against.
+func Known(prs map[string]*PR) map[string]time.Time {
+	k := make(map[string]time.Time, len(prs))
+	for key, p := range prs {
+		k[key] = p.UpdatedAt
+	}
+	return k
 }

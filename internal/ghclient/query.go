@@ -1,6 +1,9 @@
 package ghclient
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // Actor is any comment/review/commit author. Bots and deleted users decode to
 // a zero value (empty login); attribution logic treats "" as unknown.
@@ -78,21 +81,38 @@ type PullRequest struct {
 	} `graphql:"reviewThreads(last: 30)"`
 }
 
-// searchQuery fetches one page of the watched set. Pages are kept small
-// (see pageSize): with the nested commit/review/comment lists, large pages
-// make GitHub's GraphQL gateway time out with 502s.
-type searchQuery struct {
+// PRRef is a listing node: enough to key a PR and tell whether its stored
+// payload is stale.
+type PRRef struct {
+	ID         string `graphql:"id"`
+	Number     int
+	UpdatedAt  time.Time
+	Repository struct {
+		NameWithOwner string
+	}
+}
+
+func (r PRRef) Key() string { return r.Repository.NameWithOwner + "#" + strconv.Itoa(r.Number) }
+
+// listQuery fetches one page of the watch set's keys.
+type listQuery struct {
 	Viewer struct {
 		Login string
 	}
 	Search struct {
-		IssueCount int
-		PageInfo   struct {
+		PageInfo struct {
 			HasNextPage bool
 			EndCursor   string
 		}
 		Nodes []struct {
-			PullRequest PullRequest `graphql:"... on PullRequest"`
+			PullRequest PRRef `graphql:"... on PullRequest"`
 		}
 	} `graphql:"search(query: $searchQuery, type: ISSUE, first: $pageSize, after: $cursor)"`
+}
+
+// nodesQuery fetches full payloads for one batch of PRs by node ID.
+type nodesQuery struct {
+	Nodes []struct {
+		PullRequest PullRequest `graphql:"... on PullRequest"`
+	} `graphql:"nodes(ids: $ids)"`
 }

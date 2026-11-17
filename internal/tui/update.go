@@ -31,6 +31,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pollResult:
 		m.polling = false
 		m.lastPollDone = time.Now()
+		if res := msg.res; res != nil {
+			fp := fingerprint(res.Open)
+			if fp == m.fingerprint {
+				m.unchanged++
+			} else {
+				m.unchanged = 0
+				m.fingerprint = fp
+				m.logLine(fmt.Sprintf("poll: %d PRs, activity changed", len(res.Open)))
+			}
+			m.st.MyLogin = res.Login
+			m.st.LastPollAt = time.Now()
+			m.st.PRs = derive.Merge(m.st.PRs, res.Login, res.Open, res.PRs, m.isBot, time.Now())
+			sc := worktree.NewScanner()
+			for _, p := range m.st.PRs {
+				sc.Annotate(p, m.ix)
+			}
+			m.saveState()
+			m.rebuild()
+			m.backlog = res.Remaining
+		}
 		if msg.err != nil {
 			if m.pollErr == "" {
 				m.logLine("poll error: " + msg.err.Error())
@@ -42,23 +62,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logLine("poll recovered")
 		}
 		m.pollErr = ""
-		fp := fingerprint(msg.prs)
-		if fp == m.fingerprint {
-			m.unchanged++
-		} else {
-			m.unchanged = 0
-			m.fingerprint = fp
-			m.logLine(fmt.Sprintf("poll: %d PRs, activity changed", len(msg.prs)))
+		if m.backlog > 0 {
+			// Catching up: progress is already saved, go straight to the
+			// next round instead of waiting out the interval.
+			m.logLine(fmt.Sprintf("catching up: fetched %d, %d PRs left", len(msg.res.PRs), m.backlog))
+			return m, m.startPoll()
 		}
-		m.st.MyLogin = msg.login
-		m.st.LastPollAt = time.Now()
-		m.st.PRs = derive.ApplyAll(m.st.PRs, msg.login, msg.prs, m.isBot, time.Now())
-		sc := worktree.NewScanner()
-		for _, p := range m.st.PRs {
-			sc.Annotate(p, m.ix)
-		}
-		m.saveState()
-		m.rebuild()
 		return m, nil
 
 	case engageResult:
@@ -94,7 +103,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) startPoll() tea.Cmd {
 	m.polling = true
 	m.lastPollStart = time.Now()
-	return pollCmd(m.client, m.ix)
+	return pollCmd(m.client, m.ix, derive.Known(m.st.PRs))
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
