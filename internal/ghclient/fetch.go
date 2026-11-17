@@ -1,4 +1,4 @@
-// Package ghclient fetches the watched PR set with one GraphQL search query.
+// Package ghclient syncs the watched PR set over GitHub GraphQL.
 package ghclient
 
 import (
@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
@@ -47,44 +48,127 @@ func New(ctx context.Context) (*Client, error) {
 	return &Client{gql: githubv4.NewClient(oauth2.NewClient(ctx, src))}, nil
 }
 
-// pageSize trades round-trips for query cost: each PR carries nested
-// commit/review/comment lists, and pages much larger than this make GitHub's
-// GraphQL gateway time out (502).
-const pageSize = 25
+// The watch set is synced in two steps so no single request has to carry
+// the whole set: a cheap listing (key + updatedAt only) establishes
+// membership, then full payloads are fetched only for PRs whose updatedAt
+// moved, in small batches, a bounded number per round. Every request gets its
+// own deadline, so a large backlog costs more rounds, never a longer request.
+const (
+	// listPageSize is safe at the search maximum: listing nodes are a few
+	// scalar fields each.
+	listPageSize = 100
+	// maxListPages stops at GitHub's 1000-result search cap.
+	maxListPages = 10
+	// batchSize bounds a detail request: each PR carries nested
+	// commit/review/comment lists, and much more than this per request makes
+	// GitHub's GraphQL gateway time out (502).
+	batchSize = 25
+	// requestTimeout is the deadline for one listing page or detail batch.
+	requestTimeout = 30 * time.Second
+	// BatchesPerRound bounds one Sync call to ~100 detail fetches (a
+	// handful of seconds); callers re-run Sync while Remaining > 0.
+	BatchesPerRound = 4
+)
 
-// maxPages caps the watch set; beyond this the inbox framing has already
-// lost, no point hammering the API.
-const maxPages = 10
+// SyncResult is one round of the incremental sync.
+type SyncResult struct {
+	Login string
+	// Open is the complete current watch set, newest activity first.
+	Open []PRRef
+	// PRs holds fresh payloads for the stale subset fetched this round.
+	PRs []PullRequest
+	// Remaining counts stale PRs left for later rounds.
+	Remaining int
+}
 
-// Fetch pages through the search query and returns the viewer login plus all
-// PRs. Rate cost is one point per page — noise against the 5000/hr budget.
-func (c *Client) Fetch(ctx context.Context) (string, []PullRequest, error) {
+// Sync lists the watch set and fetches full payloads for up to maxBatches
+// batches of PRs that are new or whose updatedAt is later than known[key].
+// Stale PRs are taken newest-activity first. On a failed detail batch it
+// returns the partial result alongside the error, so completed batches are
+// not lost.
+func (c *Client) Sync(ctx context.Context, known map[string]time.Time, maxBatches int) (*SyncResult, error) {
+	login, open, err := c.list(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var stale []string
+	for _, r := range open {
+		if t, ok := known[r.Key()]; !ok || r.UpdatedAt.After(t) {
+			stale = append(stale, r.ID)
+		}
+	}
+	res := &SyncResult{Login: login, Open: open, Remaining: len(stale)}
+	for i := 0; i < maxBatches && len(stale) > 0; i++ {
+		n := min(batchSize, len(stale))
+		prs, err := c.fetchBatch(ctx, stale[:n])
+		if err != nil {
+			return res, err
+		}
+		res.PRs = append(res.PRs, prs...)
+		stale = stale[n:]
+		res.Remaining = len(stale)
+	}
+	return res, nil
+}
+
+// list pages through the search with key-and-timestamp nodes only.
+// Sorting by updated-desc makes the offset cursor safe against activity
+// landing mid-listing: an updated PR jumps to the front, which can only
+// repeat an entry across a page boundary, never skip one.
+func (c *Client) list(ctx context.Context) (string, []PRRef, error) {
 	var (
 		login  string
-		prs    []PullRequest
+		refs   []PRRef
+		seen   = map[string]bool{}
 		cursor *githubv4.String
 	)
-	for range maxPages {
-		var q searchQuery
+	for range maxListPages {
+		var q listQuery
 		vars := map[string]any{
-			"searchQuery": githubv4.String(SearchQuery),
-			"pageSize":    githubv4.Int(pageSize),
+			"searchQuery": githubv4.String(SearchQuery + " sort:updated-desc"),
+			"pageSize":    githubv4.Int(listPageSize),
 			"cursor":      cursor,
 		}
-		if err := c.gql.Query(ctx, &q, vars); err != nil {
-			return "", nil, err
+		if err := c.query(ctx, &q, vars); err != nil {
+			return "", nil, fmt.Errorf("listing watch set: %w", err)
 		}
 		login = q.Viewer.Login
 		for _, n := range q.Search.Nodes {
-			if n.PullRequest.Number == 0 {
-				continue // non-PR search node
+			r := n.PullRequest
+			if r.Number == 0 || seen[r.Key()] {
+				continue // non-PR search node, or repeated across pages
 			}
-			prs = append(prs, n.PullRequest)
+			seen[r.Key()] = true
+			refs = append(refs, r)
 		}
 		if !q.Search.PageInfo.HasNextPage {
 			break
 		}
 		cursor = new(githubv4.String(q.Search.PageInfo.EndCursor))
 	}
-	return login, prs, nil
+	return login, refs, nil
+}
+
+func (c *Client) fetchBatch(ctx context.Context, ids []string) ([]PullRequest, error) {
+	gids := make([]githubv4.ID, len(ids))
+	for i, id := range ids {
+		gids[i] = githubv4.ID(id)
+	}
+	var q nodesQuery
+	if err := c.query(ctx, &q, map[string]any{"ids": gids}); err != nil {
+		return nil, fmt.Errorf("fetching %d PRs: %w", len(ids), err)
+	}
+	prs := make([]PullRequest, 0, len(q.Nodes))
+	for _, n := range q.Nodes {
+		if n.PullRequest.Number != 0 { // deleted between list and fetch
+			prs = append(prs, n.PullRequest)
+		}
+	}
+	return prs, nil
+}
+
+func (c *Client) query(ctx context.Context, q any, vars map[string]any) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	return c.gql.Query(ctx, q, vars)
 }
